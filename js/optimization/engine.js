@@ -1,112 +1,118 @@
-// Nearest Neighbor + 2-opt + Or-opt pada matriks jarak jalan NYATA (boleh asimetris).
-// Konvensi indeks: titik 0 = start. Mode:
-//   round_trip         : start -> ... -> start        (closed = true, endIdx = startIdx)
-//   open_route         : start -> ... -> (outlet bebas) (closed = false, endIdx = null)
-//   different_end_point: start -> ... -> endIdx       (closed = false, endIdx = indeks titik akhir)
-
-export function nearestNeighbor(matrix, startIdx, candidates) {
-  const left = new Set(candidates);
+// Nearest Neighbor + 2-opt untuk single-day TSP.
+export function nearestNeighbor(matrix, startIdx) {
+  const N = matrix.length;
+  const visited = new Array(N).fill(false);
   const order = [startIdx];
+  visited[startIdx] = true;
   let cur = startIdx;
-  while (left.size) {
+  for (let step = 1; step < N; step++) {
     let best = -1, bestD = Infinity;
-    for (const j of left) { const d = matrix[cur][j]; if (d < bestD) { bestD = d; best = j; } }
-    if (best === -1) best = left.values().next().value;
-    left.delete(best); order.push(best); cur = best;
+    for (let j = 0; j < N; j++) {
+      if (visited[j]) continue;
+      const d = matrix[cur][j];
+      if (d < bestD) { bestD = d; best = j; }
+    }
+    if (best === -1) {
+      for (let j = 0; j < N; j++) if (!visited[j]) order.push(j);
+      break;
+    }
+    visited[best] = true;
+    order.push(best);
+    cur = best;
   }
   return order;
 }
 
-export function tourCost(matrix, tour, wrap) {
-  let c = 0;
-  for (let i = 0; i < tour.length - 1; i++) c += matrix[tour[i]][tour[i + 1]];
-  if (wrap && tour.length > 1) c += matrix[tour[tour.length - 1]][tour[0]];
-  return c;
+function safeCost(v) { return (v == null || !isFinite(v)) ? 1e12 : v; }
+
+function pathCost(matrix, order, closed) {
+  let cost = 0;
+  for (let i = 0; i < order.length - 1; i++) cost += safeCost(matrix[order[i]][order[i+1]]);
+  if (closed) cost += safeCost(matrix[order[order.length - 1]][order[0]]);
+  return cost;
 }
 
-// 2-opt dengan delta O(1) (prefix sum maju & mundur => benar untuk matriks asimetris)
-function twoOpt(m, t, wrap, lo, hi, deadline) {
-  const L = t.length;
-  let improved = true;
-  while (improved && Date.now() < deadline) {
-    improved = false;
-    const F = new Float64Array(L), B = new Float64Array(L);
-    for (let j = 0; j < L - 1; j++) { F[j + 1] = F[j] + m[t[j]][t[j + 1]]; B[j + 1] = B[j] + m[t[j + 1]][t[j]]; }
-    outer:
-    for (let i = lo; i < hi; i++) {
-      for (let k = i + 1; k <= hi; k++) {
-        const prev = t[i - 1], a = t[i], b = t[k];
-        const hasNext = k < L - 1 || wrap;
-        const next = k < L - 1 ? t[k + 1] : t[0];
-        const oldC = m[prev][a] + (F[k] - F[i]) + (hasNext ? m[b][next] : 0);
-        const newC = m[prev][b] + (B[k] - B[i]) + (hasNext ? m[a][next] : 0);
-        if (newC < oldC - 1e-6) {
-          for (let x = i, y = k; x < y; x++, y--) { const tmp = t[x]; t[x] = t[y]; t[y] = tmp; }
-          improved = true; break outer;
+export function twoOpt(matrix, order, {
+  closed = false, freezeFirst = true, freezeLast = false, maxIter = 1000
+} = {}) {
+  const N = order.length;
+  if (N < 4) return { order: order.slice(), cost: pathCost(matrix, order, closed), iterations: 0 };
+
+  let best = order.slice();
+  let bestCost = pathCost(matrix, best, closed);
+  let improved = true, iterations = 0;
+  const startI = freezeFirst ? 1 : 0;
+  const endI = freezeLast ? N - 2 : N - 1;
+
+  while (improved && iterations < maxIter) {
+    improved = false; iterations++;
+    for (let i = startI; i < endI; i++) {
+      for (let k = i + 1; k <= endI; k++) {
+        const candidate = best.slice(0, i)
+          .concat(best.slice(i, k + 1).reverse(), best.slice(k + 1));
+        const cost = pathCost(matrix, candidate, closed);
+        if (cost < bestCost - 1e-6) {
+          best = candidate; bestCost = cost; improved = true;
         }
       }
     }
   }
+  return { order: best, cost: bestCost, iterations };
 }
 
-// Or-opt: pindahkan segmen 1-3 titik ke posisi lain
-function orOpt(m, t, wrap, lo, hi, deadline) {
-  let improved = false, again = true;
-  while (again && Date.now() < deadline) {
-    again = false;
-    let cur = tourCost(m, t, wrap);
-    search:
-    for (let len = 1; len <= 3; len++) {
-      for (let i = lo; i + len - 1 <= hi; i++) {
-        const seg = t.slice(i, i + len);
-        const rest = t.slice(0, i).concat(t.slice(i + len));
-        const maxP = rest.length - (hi === t.length - 1 ? 0 : 1); // jaga titik akhir tetap di ujung
-        for (let p = lo; p <= maxP; p++) {
-          if (p === i) continue;
-          const cand = rest.slice(0, p).concat(seg, rest.slice(p));
-          const c = tourCost(m, cand, wrap);
-          if (c < cur - 1e-6) { for (let x = 0; x < cand.length; x++) t[x] = cand[x]; again = true; improved = true; break search; }
-        }
-      }
-    }
-  }
-  return improved;
-}
-
-export function optimizeRoute(matrix, { startIdx = 0, endIdx = null, closed = true, timeLimitMs = 2000 } = {}) {
+export function optimizeRoute(matrix, { startIdx = 0, endIdx = null, closed = true } = {}) {
   const N = matrix.length;
-  const fixedEnd = endIdx != null && endIdx !== startIdx;
-  const mutable = [];
-  for (let i = 0; i < N; i++) if (i !== startIdx && !(fixedEnd && i === endIdx)) mutable.push(i);
+  const effectiveClosed = closed && (endIdx == null || endIdx === startIdx);
+  const effectiveEnd = (endIdx != null && endIdx !== startIdx) ? endIdx : null;
 
-  let tour = nearestNeighbor(matrix, startIdx, mutable);
-  if (fixedEnd) tour.push(endIdx);
-  const wrap = closed && !fixedEnd;
-  const lo = 1, hi = fixedEnd ? tour.length - 2 : tour.length - 1;
-
-  if (hi - lo >= 1) {
-    const deadline = Date.now() + timeLimitMs;
-    let rounds = 0, prev = Infinity;
-    while (Date.now() < deadline && rounds++ < 50) {
-      twoOpt(matrix, tour, wrap, lo, hi, deadline);
-      if (tour.length <= 150) orOpt(matrix, tour, wrap, lo, hi, deadline);
-      const c = tourCost(matrix, tour, wrap);
-      if (c >= prev - 1e-6) break;
-      prev = c;
-    }
+  const middle = [];
+  for (let i = 0; i < N; i++) {
+    if (i === startIdx) continue;
+    if (effectiveEnd != null && i === effectiveEnd) continue;
+    middle.push(i);
   }
-  const total_cost = tourCost(matrix, tour, wrap);
-  return { order: tour, full_order: wrap ? tour.concat([startIdx]) : tour, total_cost };
+  const subset = [startIdx, ...middle];
+  if (effectiveEnd != null) subset.push(effectiveEnd);
+  const subN = subset.length;
+
+  if (subN <= 2) {
+    const ord = subset.slice();
+    if (effectiveClosed) ord.push(startIdx);
+    return { order: ord, total_cost: pathCost(matrix, ord, false), iterations: 0 };
+  }
+
+  const subM = Array.from({ length: subN }, (_, i) =>
+    Array.from({ length: subN }, (_, j) => matrix[subset[i]][subset[j]])
+  );
+
+  let order = nearestNeighbor(subM, 0);
+  if (effectiveEnd != null) {
+    const endPos = order.indexOf(subN - 1);
+    if (endPos !== subN - 1) order = order.filter(x => x !== subN - 1).concat([subN - 1]);
+  }
+
+  const { order: optimized, cost, iterations } = twoOpt(subM, order, {
+    closed: effectiveClosed, freezeFirst: true, freezeLast: effectiveEnd != null
+  });
+
+  const finalOrder = optimized.map(i => subset[i]);
+  if (effectiveClosed) finalOrder.push(startIdx);
+  return { order: finalOrder, total_cost: cost, iterations: iterations + 1 };
 }
 
-// Baseline = urutan input (tanpa optimasi), dengan aturan start/end yang sama.
 export function baselineCost(matrix, { startIdx = 0, endIdx = null, closed = true } = {}) {
   const N = matrix.length;
-  const fixedEnd = endIdx != null && endIdx !== startIdx;
-  const mid = [];
-  for (let i = 0; i < N; i++) if (i !== startIdx && !(fixedEnd && i === endIdx)) mid.push(i);
-  const order = [startIdx, ...mid];
-  if (fixedEnd) order.push(endIdx);
-  const wrap = closed && !fixedEnd;
-  return { order: wrap ? order.concat([startIdx]) : order, cost: tourCost(matrix, order, wrap) };
+  const effectiveClosed = closed && (endIdx == null || endIdx === startIdx);
+  const effectiveEnd = (endIdx != null && endIdx !== startIdx) ? endIdx : null;
+  const order = [startIdx];
+  for (let i = 0; i < N; i++) {
+    if (i === startIdx) continue;
+    if (effectiveEnd != null && i === effectiveEnd) continue;
+    order.push(i);
+  }
+  if (effectiveEnd != null) order.push(effectiveEnd);
+  if (effectiveClosed) order.push(startIdx);
+  let cost = 0;
+  for (let i = 0; i < order.length - 1; i++) cost += safeCost(matrix[order[i]][order[i+1]]);
+  return { order, cost };
 }
